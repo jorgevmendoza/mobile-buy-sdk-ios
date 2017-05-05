@@ -69,7 +69,10 @@ extension Graph {
     public class Client {
         
         /// The `URLSession` backing all `Client` network operations. You may provide your own session when initializing a new `Client`.
-        public let session:  URLSession
+        public let session: URLSession
+        
+        /// The cache policy to use for all query operations if no cache policy is provided at the call site.
+        public var cachePolicy: CachePolicy = .networkFirst(expireIn: 300)
         
         internal let apiURL:  URL
         internal let headers: [String : String]
@@ -127,8 +130,13 @@ extension Graph {
         /// task.resume()
         /// ````
         ///
-        public func queryGraphWith(_ query: Storefront.QueryRootQuery, retryHandler: RetryHandler<Storefront.QueryRoot>? = nil, completionHandler: @escaping QueryCompletion) -> Task {
-            return self.graphRequestTask(query: query, retryHandler: retryHandler, completionHandler: completionHandler)
+        public func queryGraphWith(_ query: Storefront.QueryRootQuery, retryHandler: RetryHandler<Storefront.QueryRoot>? = nil, cachePolicy: CachePolicy? = nil, completionHandler: @escaping QueryCompletion) -> Task {
+            return self.graphRequestTask(
+                query:             query,
+                retryHandler:      retryHandler,
+                cachePolicy:       cachePolicy ?? self.cachePolicy,
+                completionHandler: completionHandler
+            )
         }
         
         // ----------------------------------
@@ -151,18 +159,35 @@ extension Graph {
         /// ````
         ///
         public func mutateGraphWith(_ mutation: Storefront.MutationQuery, retryHandler: RetryHandler<Storefront.Mutation>? = nil, completionHandler: @escaping MutationCompletion) -> Task {
-            return self.graphRequestTask(query: mutation, retryHandler: retryHandler, completionHandler: completionHandler)
+            return self.graphRequestTask(
+                query:             mutation,
+                retryHandler:      retryHandler,
+                cachePolicy:       .networkOnly,
+                completionHandler: completionHandler
+            )
         }
         
         // ----------------------------------
         //  MARK: - Request Management -
         //
-        private func graphRequestTask<Q: GraphQL.AbstractQuery, R: GraphQL.AbstractResponse>(query: Q, retryHandler: RetryHandler<R>? = nil, completionHandler: @escaping (R?, QueryError?) -> Void) -> Task {
+        private func graphRequestTask<Q: GraphQL.AbstractQuery, R: GraphQL.AbstractResponse>(query: Q, retryHandler: RetryHandler<R>? = nil, cachePolicy: CachePolicy, completionHandler: @escaping (R?, QueryError?) -> Void) -> Task {
             
-            var task: Task!
+            /* -------------------------------------
+             ** We disallow caching for any requests
+             ** that provide a retry handler as those
+             ** requests are generally expecting for
+             ** some state to change. Returning cached
+             ** data may interfere with this expectation.
+             */
+            var resolvedCachePolicy = cachePolicy
+            if retryHandler != nil {
+                resolvedCachePolicy = .networkOnly
+            }
+            
+            var task: DataTask!
             
             let request  = self.graphRequestFor(query: query)
-            let dataTask = self.session.graphTask(with: request) { (response: R?, error: QueryError?) in
+            let dataTask = self.session.graphTask(with: request, cachePolicy: cachePolicy) { (response: R?, error: QueryError?) in
                 DispatchQueue.main.async {
                     
                     if var retryHandler = retryHandler, retryHandler.canRetry, retryHandler.condition(response, error) == true {
@@ -174,7 +199,12 @@ extension Graph {
                          */
                         retryHandler.repeatCount += 1
                         
-                        let retryTask = self.graphRequestTask(query: query, retryHandler: retryHandler, completionHandler: completionHandler)
+                        let retryTask = self.graphRequestTask(
+                            query:             query,
+                            retryHandler:      retryHandler,
+                            cachePolicy:       cachePolicy,
+                            completionHandler: completionHandler
+                        ) as
                         task.setTask(retryTask.task)
                         
                         DispatchQueue.main.asyncAfter(deadline: .now() + retryHandler.interval) {
@@ -189,7 +219,7 @@ extension Graph {
                 }
             }
             
-            task = Task(representing: dataTask)
+            task = DataTask(representing: dataTask)
             return task
         }
         
@@ -216,8 +246,8 @@ extension Graph {
 //
 private extension URLSession {
     
-    func graphTask<R: GraphQL.AbstractResponse>(with request: URLRequest, completionHandler: @escaping (R?, Graph.QueryError?) -> Void) -> URLSessionDataTask {
-        return self.dataTask(with: request) { json, error in
+    func graphTask<R: GraphQL.AbstractResponse>(with request: URLRequest, cachePolicy: Graph.CachePolicy, completionHandler: @escaping (R?, Graph.QueryError?) -> Void) -> URLSessionDataTask {
+        return self.dataTask(with: request, cachePolicy: cachePolicy) { json, error in
             
             if let json = json {
                 
@@ -233,7 +263,7 @@ private extension URLSession {
         }
     }
     
-    func dataTask(with request: URLRequest, completionHandler: @escaping (JSON?, Graph.QueryError?) -> Void) -> URLSessionDataTask {
+    func dataTask(with request: URLRequest, cachePolicy: Graph.CachePolicy, completionHandler: @escaping (JSON?, Graph.QueryError?) -> Void) -> URLSessionDataTask {
         return self.dataTask(with: request) { data, response, error in
             
             guard let response = response as? HTTPURLResponse, error == nil else {

@@ -34,6 +34,24 @@ public extension Graph {
     ///
     public class Task {
         
+        // ----------------------------------
+        //  MARK: - Control -
+        //
+        /// Starts the underlying task
+        public func resume() {
+            // Does nothing
+        }
+        
+        /// Cancel the underlying task
+        public func cancel() {
+            // Does nothing
+        }
+    }
+}
+
+public extension Graph {
+    internal class DataTask: Task {
+        
         internal private(set) var task: URLSessionDataTask
         
         // ----------------------------------
@@ -53,15 +71,22 @@ public extension Graph {
         // ----------------------------------
         //  MARK: - Control -
         //
-        
-        /// Starts the underlying task
-        public func resume() {
+        public override func resume() {
+            super.resume()
+            
             self.task.resume()
         }
         
-        /// Cancel the underlying task
-        public func cancel() {
+        public override func cancel() {
+            super.cancel()
+            
             self.task.cancel()
         }
+    }
+}
+
+public extension Graph {
+    internal class CacheTask: Task {
+        
     }
 }
